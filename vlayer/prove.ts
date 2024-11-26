@@ -91,7 +91,7 @@ async function verifyProof({
   wasMember,
   account,
 }: {
-  ethClient: Client;
+  ethClient: WalletClient;
   verifier: string;
   proof: Proof;
   owner: string;
