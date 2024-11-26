@@ -1,93 +1,120 @@
 import { createVlayerClient } from "@vlayer/sdk";
-import nftSpec from "../out/ExampleNFT.sol/ExampleNFT";
-import tokenSpec from "../out/ExampleToken.sol/ExampleToken";
-import { isAddress } from "viem";
 import {
   getConfig,
   createContext,
   deployVlayerContracts,
-  waitForContractDeploy,
 } from "@vlayer/sdk/config";
+import proverSpec from "../out/DDMemberProver.sol/DDMemberProver.json";
+import verifierSpec from "../out/DDMemberVerifier.sol/DDMemberVerifier.json";
+import { isAddress, WalletClient } from "viem";
 
-import proverSpec from "../out/SimpleProver.sol/SimpleProver";
-import verifierSpec from "../out/SimpleVerifier.sol/SimpleVerifier";
+const BLOCK_NUMBER = 19117727; // Adjust as necessary
+const CLAIMER_ADDRESS = "0xaC56f7199E5D5361c7Ed75EB6C5B0608eFACc4b0"; // Replace as needed
+const CHAIN_ID = 31337; // Local Foundry chain ID
 
-const config = getConfig();
-const {
-  chain,
-  ethClient,
-  account: john,
-  proverUrl,
-  confirmations,
-} = await createContext(config);
+(async () => {
+  try {
+    const config = getConfig();
+    const {
+      chain,
+      ethClient,
+      account: user,
+      proverUrl,
+    } = await createContext(config);
 
-const INITIAL_TOKEN_SUPPLY = BigInt(10_000_000);
+    const { prover, verifier } = await deployContracts({
+      ethClient,
+      proverArgs: [BLOCK_NUMBER],
+    });
 
-const tokenDeployTransactionHash = await ethClient.deployContract({
-  abi: tokenSpec.abi,
-  bytecode: tokenSpec.bytecode.object,
-  account: john,
-  args: [john.address, INITIAL_TOKEN_SUPPLY],
-});
+    const vlayer = createVlayerClient({ url: proverUrl });
 
-const tokenAddress = await waitForContractDeploy({
-  hash: tokenDeployTransactionHash,
-});
+    const { proof, owner, wasMember } = await generateProof({ vlayer, prover });
 
-const nftDeployTransactionHash = await ethClient.deployContract({
-  abi: nftSpec.abi,
-  bytecode: nftSpec.bytecode.object,
-  account: john,
-  args: [],
-});
+    const verificationStatus = await verifyProof({
+      ethClient,
+      verifier,
+      proof,
+      owner,
+      wasMember,
+      account: user,
+    });
 
-const nftContractAddress = await waitForContractDeploy({
-  hash: nftDeployTransactionHash,
-});
+    console.log(`Final Verification Status: ${verificationStatus}`);
+  } catch (error) {
+    console.error("An error occurred:", error.message);
+    process.exit(1); // Exit with error
+  }
+})();
 
-const currentBlockNumber = await ethClient.getBlockNumber();
+async function deployContracts({ ethClient, proverArgs }) {
+  console.log("Deploying contracts...");
 
-const { prover, verifier } = await deployVlayerContracts({
-  proverSpec,
-  verifierSpec,
-  proverArgs: [tokenAddress, currentBlockNumber],
-  verifierArgs: [nftContractAddress],
-});
+  const { prover, verifier } = await deployVlayerContracts({
+    proverSpec,
+    verifierSpec,
+    proverArgs,
+  });
 
-console.log("Proving...");
-const vlayer = createVlayerClient({
-  url: proverUrl,
-});
-
-const hash = await vlayer.prove({
-  address: prover,
-  proverAbi: proverSpec.abi,
-  functionName: "balance",
-  args: [john.address],
-  chainId: chain.id,
-});
-const result = await vlayer.waitForProvingResult(hash);
-const [proof, owner, balance] = result;
-
-if (!isAddress(owner)) {
-  throw new Error(`${owner} is not a valid address`);
+  console.log(`Prover deployed at: ${prover}`);
+  console.log(`Verifier deployed at: ${verifier}`);
+  return { prover, verifier };
 }
 
-console.log("Proof result:", result);
+async function generateProof({ vlayer, prover }) {
+  console.log("Generating proof...");
 
-const verificationHash = await ethClient.writeContract({
-  address: verifier,
-  abi: verifierSpec.abi,
-  functionName: "claimWhale",
-  args: [proof, owner, balance],
-  account: john,
-});
+  const proveHash = await vlayer.prove({
+    address: prover,
+    proverAbi: proverSpec.abi,
+    functionName: "checkDDMembership",
+    args: [CLAIMER_ADDRESS],
+    chainId: CHAIN_ID,
+  });
 
-const receipt = await ethClient.waitForTransactionReceipt({
-  hash: verificationHash,
-  confirmations,
-  retryCount: 60,
-  retryDelay: 1000,
-});
+  const result = await vlayer.waitForProvingResult(proveHash);
+  const [proof, owner, wasMember] = result;
 
-console.log(`Verification result: ${receipt.status}`);
+  if (!isAddress(owner)) {
+    throw new Error(`Invalid owner address: ${owner}`);
+  }
+
+  console.log(`Proof generated. Claimer: ${owner}, WasMember: ${wasMember}`);
+  return { proof, owner, wasMember };
+}
+
+async function verifyProof({
+  ethClient,
+  verifier,
+  proof,
+  owner,
+  wasMember,
+  account,
+}: {
+  ethClient: Client;
+  verifier: string;
+  proof: Proof;
+  owner: string;
+  wasMember: boolean;
+  account: string;
+}) {
+  console.log("Verifying proof...");
+
+  const verifyHash = await ethClient.writeContract({
+    address: verifier,
+    abi: verifierSpec.abi,
+    functionName: "verifyDDMembership",
+    args: [proof, owner, wasMember],
+    account,
+  });
+
+  const receipt = await ethClient.waitForTransactionReceipt({
+    hash: verifyHash,
+    confirmations: 1, // Adjust confirmations if needed
+    retryCount: 60,
+    retryDelay: 1000,
+  });
+
+  console.log(`Verification result: ${receipt.status}`);
+  return receipt.status;
+}
